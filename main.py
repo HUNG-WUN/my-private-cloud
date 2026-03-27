@@ -16,7 +16,7 @@ security = HTTPBasic()
 
 # --- 1. Google Drive 設定 ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
-PARENT_FOLDER_ID = '1TnRuY-pLaXBo2HQrp6Zf_MthYblo5'  # 務必確認此 ID 正確
+PARENT_FOLDER_ID = '1TnRuY-pLaXBo2HQrp6Zf_MthYblo5ekK'  # 務必確認此 ID 正確
 BACKUP_FILE_NAME = "system_backup.json"
 
 
