@@ -11,12 +11,13 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from fastapi.responses import StreamingResponse
 from urllib.parse import quote
 
-app = FastAPI(title="永久化雲端系統 V5.1", description="修復 500 錯誤與刪除功能")
+app = FastAPI(title="我的終極私人雲端 V5.2", description="支援 Google Drive 同步與檔案刪除")
 security = HTTPBasic()
 
-# --- 1. Google Drive 設定 ---
+# --- 1. 設定區 ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
-PARENT_FOLDER_ID = '1TnRuY-pLaXBo2HQrp6Zf_MthYblo5ekK'  # 務必確認此 ID 正確
+# 請確保此 ID 正確，且已分享權限給 Service Account Email
+PARENT_FOLDER_ID = '1TnRuY-pLaXBo2HQrp6Zf_MthYblo5ekK'
 BACKUP_FILE_NAME = "system_backup.json"
 
 
@@ -30,55 +31,25 @@ def get_drive_service():
             creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
-        print(f"Drive Service Error: {e}")
+        print(f"Drive Auth Error: {e}")
         return None
 
 
-# --- 2. 備份邏輯 ---
-
-def sync_from_cloud():
-    service = get_drive_service()
-    if not service: return
-    try:
-        query = f"name = '{BACKUP_FILE_NAME}' and '{PARENT_FOLDER_ID}' in parents and trashed = false"
-        results = service.files().list(q=query, fields="files(id)").execute()
-        files = results.get('files', [])
-
-        if files:
-            request = service.files().get_media(fileId=files[0]['id'])
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done: _, done = downloader.next_chunk()
-
-            backup_data = json.loads(fh.getvalue().decode())
-            conn = sqlite3.connect("my_cloud.db")
-            cursor = conn.cursor()
-            for u in backup_data.get('users', []):
-                cursor.execute("INSERT OR IGNORE INTO users VALUES (?, ?, ?)", u)
-            for f in backup_data.get('files', []):
-                cursor.execute("INSERT OR IGNORE INTO files VALUES (?, ?, ?, ?, ?)", f)
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        print(f"Sync From Cloud Error: {e}")
-
-
+# --- 2. 備份與同步邏輯 ---
 def sync_to_cloud():
     service = get_drive_service()
     if not service: return
     try:
         conn = sqlite3.connect("my_cloud.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users")
+        cursor.execute("SELECT * FROM users");
         users = cursor.fetchall()
-        cursor.execute("SELECT * FROM files")
+        cursor.execute("SELECT * FROM files");
         files = cursor.fetchall()
         conn.close()
 
-        backup_data = {"users": users, "files": files}
-        media = MediaIoBaseUpload(io.BytesIO(json.dumps(backup_data).encode()), mimetype='application/json')
-
+        backup = {"users": users, "files": files}
+        media = MediaIoBaseUpload(io.BytesIO(json.dumps(backup).encode()), mimetype='application/json')
         query = f"name = '{BACKUP_FILE_NAME}' and '{PARENT_FOLDER_ID}' in parents and trashed = false"
         existing = service.files().list(q=query, fields="files(id)").execute().get('files', [])
 
@@ -88,7 +59,30 @@ def sync_to_cloud():
             meta = {'name': BACKUP_FILE_NAME, 'parents': [PARENT_FOLDER_ID]}
             service.files().create(body=meta, media_body=media).execute()
     except Exception as e:
-        print(f"Sync To Cloud Error: {e}")
+        print(f"Backup Error: {e}")
+
+
+def sync_from_cloud():
+    service = get_drive_service()
+    if not service: return
+    try:
+        query = f"name = '{BACKUP_FILE_NAME}' and '{PARENT_FOLDER_ID}' in parents and trashed = false"
+        res = service.files().list(q=query, fields="files(id)").execute().get('files', [])
+        if res:
+            request = service.files().get_media(fileId=res[0]['id'])
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done: _, done = downloader.next_chunk()
+            data = json.loads(fh.getvalue().decode())
+            conn = sqlite3.connect("my_cloud.db")
+            cursor = conn.cursor()
+            for u in data.get('users', []): cursor.execute("INSERT OR IGNORE INTO users VALUES (?,?,?)", u)
+            for f in data.get('files', []): cursor.execute("INSERT OR IGNORE INTO files VALUES (?,?,?,?,?)", f)
+            conn.commit();
+            conn.close()
+    except Exception as e:
+        print(f"Restore Error: {e}")
 
 
 # --- 3. 初始化 ---
@@ -97,14 +91,9 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute(
         "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT)")
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, drive_file_id TEXT, 
-            upload_date DATETIME DEFAULT CURRENT_TIMESTAMP, owner_id INTEGER,
-            FOREIGN KEY(owner_id) REFERENCES users(id)
-        )
-    """)
-    conn.commit()
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, drive_file_id TEXT, upload_date DATETIME DEFAULT CURRENT_TIMESTAMP, owner_id INTEGER, FOREIGN KEY(owner_id) REFERENCES users(id))")
+    conn.commit();
     conn.close()
     sync_from_cloud()
 
@@ -112,13 +101,11 @@ def init_db():
 init_db()
 
 
-# --- 4. 路由 ---
-
-def get_current_user(credentials: HTTPBasicCredentials = Depends(security)):
+# --- 4. 路由實作 ---
+def get_user(creds: HTTPBasicCredentials = Depends(security)):
     conn = sqlite3.connect("my_cloud.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT id, username FROM users WHERE username = ? AND password = ?",
-                   (credentials.username, credentials.password))
+    cursor.execute("SELECT id, username FROM users WHERE username=? AND password=?", (creds.username, creds.password))
     user = cursor.fetchone()
     conn.close()
     if not user: raise HTTPException(status_code=401, detail="驗證失敗")
@@ -131,7 +118,7 @@ async def register(username: str, password: str):
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
-        conn.commit()
+        conn.commit();
         sync_to_cloud()
         return {"message": "註冊成功"}
     except:
@@ -141,47 +128,44 @@ async def register(username: str, password: str):
 
 
 @app.get("/files/", tags=["檔案操作"])
-async def list_files(user=Depends(get_current_user)):
+async def list_files(u=Depends(get_user)):
     conn = sqlite3.connect("my_cloud.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, upload_date FROM files WHERE owner_id = ?", (user["id"],))
-    rows = cursor.fetchall()
+    cursor.execute("SELECT id, name, upload_date FROM files WHERE owner_id=?", (u["id"],))
+    rows = cursor.fetchall();
     conn.close()
     return [{"id": r[0], "name": r[1], "date": r[2]} for r in rows]
 
 
 @app.post("/upload/", tags=["檔案操作"])
-async def upload_file(file: UploadFile = File(...), user=Depends(get_current_user)):
+async def upload(file: UploadFile = File(...), u=Depends(get_user)):
     service = get_drive_service()
-    if not service: raise HTTPException(status_code=500, detail="Google Service 異常")
-
-    content = await file.read()
     meta = {'name': file.filename, 'parents': [PARENT_FOLDER_ID]}
-    media = MediaIoBaseUpload(io.BytesIO(content), mimetype=file.content_type)
-    drive_file = service.files().create(body=meta, media_body=media, fields='id').execute()
+    media = MediaIoBaseUpload(io.BytesIO(await file.read()), mimetype=file.content_type)
+    drive_id = service.files().create(body=meta, media_body=media, fields='id').execute().get('id')
 
     conn = sqlite3.connect("my_cloud.db")
     cursor = conn.cursor()
     cursor.execute("INSERT INTO files (name, drive_file_id, owner_id) VALUES (?, ?, ?)",
-                   (file.filename, drive_file.get('id'), user["id"]))
-    conn.commit()
-    conn.close()
+                   (file.filename, drive_id, u["id"]))
+    conn.commit();
+    conn.close();
     sync_to_cloud()
     return {"message": "上傳成功"}
 
 
 @app.get("/download/{file_id}", tags=["檔案操作"])
-async def download_file(file_id: int, user=Depends(get_current_user)):
-    conn = sqlite3.connect("my_cloud.db")
+async def download(file_id: int, u=Depends(get_user)):
+    conn = sqlite3.connect("my_cloud.db");
     cursor = conn.cursor()
-    cursor.execute("SELECT name, drive_file_id FROM files WHERE id = ? AND owner_id = ?", (file_id, user["id"]))
-    res = cursor.fetchone()
+    cursor.execute("SELECT name, drive_file_id FROM files WHERE id=? AND owner_id=?", (file_id, u["id"]))
+    res = cursor.fetchone();
     conn.close()
-    if not res: raise HTTPException(status_code=404, detail="找不到檔案")
+    if not res: raise HTTPException(404, "找不到檔案")
 
     service = get_drive_service()
     request = service.files().get_media(fileId=res[1])
-    fh = io.BytesIO()
+    fh = io.BytesIO();
     downloader = MediaIoBaseDownload(fh, request)
     done = False
     while not done: _, done = downloader.next_chunk()
@@ -190,30 +174,26 @@ async def download_file(file_id: int, user=Depends(get_current_user)):
                              headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(res[0])}"})
 
 
-# --- 補回刪除功能 ---
+# 補回刪除功能
 @app.delete("/delete/{file_id}", tags=["檔案操作"])
-async def delete_file(file_id: int, user=Depends(get_current_user)):
-    conn = sqlite3.connect("my_cloud.db")
+async def delete(file_id: int, u=Depends(get_user)):
+    conn = sqlite3.connect("my_cloud.db");
     cursor = conn.cursor()
-    cursor.execute("SELECT drive_file_id FROM files WHERE id = ? AND owner_id = ?", (file_id, user["id"]))
+    cursor.execute("SELECT drive_file_id FROM files WHERE id=? AND owner_id=?", (file_id, u["id"]))
     res = cursor.fetchone()
+    if not res: conn.close(); raise HTTPException(404, "權限不足或檔案不存在")
 
-    if not res:
-        conn.close()
-        raise HTTPException(status_code=404, detail="檔案不存在")
-
-    drive_id = res[0]
-    service = get_drive_service()
+    # 刪除 Drive 實體
     try:
-        service.files().delete(fileId=drive_id).execute()
+        get_drive_service().files().delete(fileId=res[0]).execute()
     except:
         pass
 
-    cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
-    conn.commit()
-    conn.close()
+    cursor.execute("DELETE FROM files WHERE id=?", (file_id,))
+    conn.commit();
+    conn.close();
     sync_to_cloud()
-    return {"message": "已刪除紀錄與雲端檔案"}
+    return {"message": "檔案已移除"}
 
 
 if __name__ == "__main__":
