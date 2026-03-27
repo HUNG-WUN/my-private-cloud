@@ -1,0 +1,8 @@
+# 忽略資料庫
+*.db
+# 忽略 Google API 金鑰 (重要！)
+credentials.json
+# 忽略 Python 快取
+__pycache__/
+.venv/
+.idea/
