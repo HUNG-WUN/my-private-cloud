@@ -141,19 +141,38 @@ async def list_files(u=Depends(get_user)):
 
 @app.post("/upload/", tags=["檔案操作"])
 async def upload(file: UploadFile = File(...), u=Depends(get_user)):
-    service = get_drive_service()
-    meta = {'name': file.filename, 'parents': [PARENT_FOLDER_ID]}
-    media = MediaIoBaseUpload(io.BytesIO(await file.read()), mimetype=file.content_type)
-    drive_id = service.files().create(body=meta, media_body=media, fields='id').execute().get('id')
+    try:
+        service = get_drive_service()
+        # 讀取檔案內容
+        file_content = await file.read()
 
-    conn = sqlite3.connect("my_cloud.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO files (name, drive_file_id, owner_id) VALUES (?, ?, ?)",
-                   (file.filename, drive_id, u["id"]))
-    conn.commit();
-    conn.close();
-    sync_to_cloud()
-    return {"message": "上傳成功"}
+        # 準備上傳至 Google Drive
+        meta = {'name': file.filename, 'parents': [PARENT_FOLDER_ID]}
+        media = MediaIoBaseUpload(io.BytesIO(file_content), mimetype=file.content_type)
+
+        # 執行上傳
+        drive_file = service.files().create(body=meta, media_body=media, fields='id').execute()
+        drive_id = drive_file.get('id')
+
+        # 寫入資料庫
+        conn = sqlite3.connect("my_cloud.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO files (name, drive_file_id, owner_id) VALUES (?, ?, ?)",
+                       (file.filename, drive_id, u["id"]))
+        conn.commit()
+        conn.close()
+
+        # 備份到雲端
+        sync_to_cloud()
+
+        return {"message": "上傳成功", "id": drive_id}
+
+    except Exception as e:
+        # 這行非常重要：它會把真正的錯誤原因回傳給你的 Curl
+        import traceback
+        error_details = traceback.format_exc()
+        print(error_details)  # 在 Render Logs 顯示
+        raise HTTPException(status_code=500, detail=f"上傳崩潰原因: {str(e)}")
 
 
 @app.delete("/delete/{file_id}", tags=["檔案操作"])
